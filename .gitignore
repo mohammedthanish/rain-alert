@@ -1,0 +1,5 @@
+config.env
+run.log
+*.log.old
+.DS_Store
+__pycache__/

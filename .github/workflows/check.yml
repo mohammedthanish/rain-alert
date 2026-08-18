@@ -1,0 +1,100 @@
+name: Rain alerts
+
+on:
+  schedule:
+    # Every 15 minutes, off the congested :00/:15/:30/:45 slots which
+    # GitHub delays hardest. The scheduler still skips slots under load;
+    # treat these as a target, not a guarantee. This repo is public, so
+    # these runs cost no Actions minutes.
+    - cron: "4,19,34,49 * * * *"
+  workflow_dispatch:
+    inputs:
+      test_email:
+        description: "Send a test alert instead of checking (verifies the repo secrets)"
+        type: boolean
+        default: false
+      force_daily:
+        description: "Send the daily outlook email now, regardless of state"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rain-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Send test alert
+        if: inputs.test_email
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python3 rain_alert.py --test-email
+
+      - name: Send daily outlook now
+        if: inputs.force_daily
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          HOME_LAT: ${{ secrets.HOME_LAT }}
+          HOME_LON: ${{ secrets.HOME_LON }}
+          OFFICE_LAT: ${{ secrets.OFFICE_LAT }}
+          OFFICE_LON: ${{ secrets.OFFICE_LON }}
+        run: python3 rain_alert.py --force-daily
+
+      - name: Run rain check
+        if: ${{ !inputs.test_email && !inputs.force_daily }}
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          # Coordinates live in secrets, not in this public repo. GitHub
+          # also masks them if they ever end up in a log line.
+          HOME_LAT: ${{ secrets.HOME_LAT }}
+          HOME_LON: ${{ secrets.HOME_LON }}
+          OFFICE_LAT: ${{ secrets.OFFICE_LAT }}
+          OFFICE_LON: ${{ secrets.OFFICE_LON }}
+        run: python3 rain_alert.py
+
+      # state.json only changes when an email actually went out (or the
+      # daily marker rolled over), so most runs commit nothing. Rebase
+      # before pushing: a manual dispatch and a scheduled run can
+      # otherwise collide on a stale main.
+      - name: Save updated state
+        if: ${{ always() && !inputs.test_email && !inputs.force_daily }}
+        run: |
+          if git diff --quiet state.json; then
+            echo "No state change to record."
+            exit 0
+          fi
+          git config user.name "rain-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add state.json
+          git commit -m "Update alert state"
+          for attempt in 1 2 3; do
+            if git push; then
+              exit 0
+            fi
+            echo "Push rejected (attempt $attempt), rebasing on origin/main..."
+            git pull --rebase origin main
+          done
+          echo "Could not push state after 3 attempts." >&2
+          exit 1
