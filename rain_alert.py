@@ -15,10 +15,14 @@ alert is cross-checked to keep false positives low, because decisions
 
 Three kinds of email:
 
-  1. Daily outlook (~7:00 IST): will it rain at the OFFICE today —
-     sent every morning, rain or shine, so a missing email means the
-     checker is broken, never "no rain". Includes a one-line home
-     outlook.
+  1. Daily outlook (~7:00 IST): will it rain at the OFFICE today.
+     The check runs every morning but the email is sent ONLY when the
+     verdict is LIKELY (take the car) — no mail on possible/unlikely
+     days. The morning check still stamps state.json daily, which
+     keeps the repo active (GitHub disables schedules on repos with no
+     activity for 60 days) and gives the healthcheck workflow a
+     heartbeat. Whether the watcher is alive is monitored separately
+     by .github/workflows/healthcheck.yml, not by this email.
   2. Rain starting soon: rain expected to begin within the next
      IMMINENT_WINDOW_MIN minutes (default 120) at home or office.
      One alert per location per SUPPRESS_HOURS.
@@ -45,6 +49,7 @@ Usage:
   rain_alert.py --status       print the current assessment, touch nothing
   rain_alert.py --test-email   send a fake alert to verify SMTP, then exit
   rain_alert.py --force-daily  send the daily outlook now, ignore state
+                               and the LIKELY-only rule (testing)
 """
 
 import json
@@ -420,7 +425,7 @@ def daily_email(data: list, now: datetime, cfg: dict) -> tuple:
     lines += block(office, ov)
     lines += [""]
     lines += block(home, hv)
-    return subject, lines
+    return subject, lines, ov["tier"]
 
 
 def imminent_email(hits: list, now: datetime, cfg: dict) -> tuple:
@@ -569,7 +574,7 @@ def main(argv: list) -> int:
         return 0
 
     if "--force-daily" in argv:
-        subject, lines = daily_email(data, now, cfg)
+        subject, lines, _ = daily_email(data, now, cfg)
         try:
             return 0 if send_email(cfg, subject, lines) else 1
         except Exception as exc:
@@ -591,18 +596,25 @@ def main(argv: list) -> int:
 
     failures = 0
 
-    # 1. Daily outlook, once per day after DAILY_AFTER.
+    # 1. Daily outlook, evaluated once per day after DAILY_AFTER, but
+    #    emailed ONLY when the office verdict is LIKELY. Dry-day checks
+    #    still stamp daily_sent so state.json moves (and is committed)
+    #    every day - that is the watcher's heartbeat.
     if state.get("daily_sent") != today and now.time() >= parse_hhmm(cfg, "DAILY_AFTER"):
-        subject, lines = daily_email(data, now, cfg)
-        try:
-            sent = send_email(cfg, subject, lines)
-        except Exception as exc:
-            log(f"ERROR: daily email failed: {exc}")
-            sent = False
-        if sent:
+        subject, lines, tier = daily_email(data, now, cfg)
+        if tier != "likely":
+            log(f"daily outlook: {tier}, no email (LIKELY-only)")
             state["daily_sent"] = today
         else:
-            failures += 1
+            try:
+                sent = send_email(cfg, subject, lines)
+            except Exception as exc:
+                log(f"ERROR: daily email failed: {exc}")
+                sent = False
+            if sent:
+                state["daily_sent"] = today
+            else:
+                failures += 1
 
     # 2. Rain starting soon (per location, suppressed per SUPPRESS_HOURS,
     #    muted in quiet hours, skipped where it is already raining).

@@ -1,0 +1,55 @@
+name: Watcher healthcheck
+
+on:
+  # Fires whenever a "Rain alerts" run completes; the job below only
+  # acts on failures (first failure of a streak emails immediately).
+  workflow_run:
+    workflows: ["Rain alerts"]
+    types: [completed]
+  # Independent staleness sweep: the watcher should succeed every ~15
+  # minutes, so "no success in 2h" means it died without even leaving
+  # a failing run (disabled schedule, broken workflow file, ...).
+  # 01:45 UTC = 07:15 IST, right after the daily-outlook window.
+  schedule:
+    - cron: "45 1,5,9,13,17,21 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  on-failure:
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          FAILED_RUN_ID: ${{ github.event.workflow_run.id }}
+          FAILED_RUN_URL: ${{ github.event.workflow_run.html_url }}
+          FAILED_RUN_EVENT: ${{ github.event.workflow_run.event }}
+        run: python3 health_check.py --mode failure
+
+  staleness:
+    if: github.event_name != 'workflow_run'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python3 health_check.py --mode stale
